@@ -10,11 +10,26 @@
 #include <png.h>
 #include <dbus/dbus.h>
 #include <immintrin.h>  // For SIMD
+#ifdef __linux__
+#include <sys/sendfile.h>
+#endif
 
 #ifdef USE_WLROOTS
 #include <wayland-client.h>
-#include <wlr-screencopy-unstable-v1-client-protocol.h>
+#include "wlr-screencopy-unstable-v1-client-protocol.h"
 #include <sys/mman.h>
+#define _GNU_SOURCE
+#include <sys/types.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
+static inline int memfd_create(const char *name, unsigned int flags) {
+    return syscall(__NR_memfd_create, name, flags);
+}
 #endif
 
 void die(const char *msg) {
@@ -203,6 +218,9 @@ static void frame_handle_buffer(void *data,
     ctx->buffer = wl_shm_pool_create_buffer(pool, 0, width, height, stride, format);
     wl_shm_pool_destroy(pool);
     close(fd);
+    
+    // Copy frame to buffer
+    zwlr_screencopy_frame_v1_copy(frame, ctx->buffer);
 }
 
 static void frame_handle_flags(void *data,
@@ -232,15 +250,55 @@ static const struct zwlr_screencopy_frame_v1_listener frame_listener = {
     .failed = frame_handle_failed,
 };
 
-void screenshot_wlroots(const char *filename) {
+static void registry_handle_global(void *data, struct wl_registry *registry,
+    uint32_t name, const char *interface, uint32_t version)
+{
+    struct screencopy_data *ctx = data;
+    
+    if (strcmp(interface, wl_shm_interface.name) == 0) {
+        ctx->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+    } else if (strcmp(interface, wl_output_interface.name) == 0) {
+        if (!ctx->output) {
+            ctx->output = wl_registry_bind(registry, name, &wl_output_interface, 2);
+        }
+    } else if (strcmp(interface, zwlr_screencopy_manager_v1_interface.name) == 0) {
+        ctx->screencopy_manager = wl_registry_bind(registry, name,
+            &zwlr_screencopy_manager_v1_interface, 1);
+    }
+}
+
+static void registry_handle_global_remove(void *data, struct wl_registry *registry,
+    uint32_t name)
+{
+    // Unused
+}
+
+static const struct wl_registry_listener registry_listener = {
+    .global = registry_handle_global,
+    .global_remove = registry_handle_global_remove,
+};
+
+int screenshot_wlroots(const char *filename) {
     struct wl_display *display = wl_display_connect(NULL);
-    if (!display) die("Cannot connect to Wayland display");
+    if (!display) return 0; // Cannot connect, try other methods
     
     struct screencopy_data ctx = {0};
     
     // Get registry and bind interfaces
     struct wl_registry *registry = wl_display_get_registry(display);
-    // Simplified - would need full registry handling
+    wl_registry_add_listener(registry, &registry_listener, &ctx);
+    wl_display_roundtrip(display);
+    wl_display_roundtrip(display);
+    
+    if (!ctx.screencopy_manager) {
+        wl_display_disconnect(display);
+        return 0; // Fall back to DBus method
+    }
+    
+    if (!ctx.output) {
+        wl_display_disconnect(display);
+        return 0; // No output found
+    }
     
     // Capture frame
     ctx.frame = zwlr_screencopy_manager_v1_capture_output(
@@ -256,6 +314,7 @@ void screenshot_wlroots(const char *filename) {
     // Cleanup
     munmap(ctx.data, ctx.stride * ctx.height);
     wl_display_disconnect(display);
+    return 1; // Success
 }
 #endif
 
@@ -263,11 +322,8 @@ void screenshot_wayland(const char *filename) {
 #ifdef USE_WLROOTS
     // Try wlr-screencopy first
     if (getenv("WAYLAND_DISPLAY")) {
-        struct wl_display *display = wl_display_connect(NULL);
-        if (display) {
-            wl_display_disconnect(display);
-            screenshot_wlroots(filename);
-            return;
+        if (screenshot_wlroots(filename)) {
+            return; // Success with wlr-screencopy
         }
     }
 #endif
@@ -278,12 +334,18 @@ void screenshot_wayland(const char *filename) {
     
     dbus_error_init(&err);
     conn = dbus_bus_get(DBUS_BUS_SESSION, &err);
-    if (!conn) die("Cannot connect to DBus");
+    if (!conn) {
+        if (dbus_error_is_set(&err)) {
+            fprintf(stderr, "DBus error: %s\n", err.message);
+            dbus_error_free(&err);
+        }
+        die("Cannot connect to DBus");
+    }
     
-    // Try wlroots-based compositors (Sway, etc) via grim protocol
-    msg = dbus_message_new_method_call("org.freedesktop.impl.portal.desktop.wlr",
+    // Try XDG Desktop Portal first (works without special permissions)
+    msg = dbus_message_new_method_call("org.freedesktop.portal.Desktop",
                                        "/org/freedesktop/portal/desktop",
-                                       "org.freedesktop.impl.portal.Screenshot",
+                                       "org.freedesktop.portal.Screenshot",
                                        "Screenshot");
     
     if (msg) {
@@ -310,15 +372,24 @@ void screenshot_wayland(const char *filename) {
     
     // Try KDE first (fastest on KDE Plasma)
     msg = dbus_message_new_method_call("org.kde.KWin",
-                                       "/Screenshot",
+                                       "/org/kde/KWin/Screenshot",
                                        "org.kde.kwin.Screenshot",
                                        "screenshotFullscreen");
     if (!msg) die("Cannot create DBus message");
     
-    // Shorter timeout for faster fallback
-    reply = dbus_connection_send_with_reply_and_block(conn, msg, 500, &err);
+    // Add captureCursor parameter (bool) - KDE method signature
+    DBusMessageIter args;
+    dbus_message_iter_init_append(msg, &args);
+    dbus_bool_t capture_cursor = FALSE;
+    dbus_message_iter_append_basic(&args, DBUS_TYPE_BOOLEAN, &capture_cursor);
+    
+    // Longer timeout for KDE as it needs to write file
+    reply = dbus_connection_send_with_reply_and_block(conn, msg, 2000, &err);
     
     if (!reply) {
+        if (dbus_error_is_set(&err)) {
+            fprintf(stderr, "KDE screenshot failed: %s\n", err.message);
+        }
         dbus_message_unref(msg);
         dbus_error_free(&err);
         
@@ -351,13 +422,14 @@ void screenshot_wayland(const char *filename) {
         return;
     }
     
-    // KDE path - copy file efficiently
+    // KDE path - get the temporary file path from reply
     char *tmp_path;
     if (!dbus_message_get_args(reply, &err, DBUS_TYPE_STRING, &tmp_path, DBUS_TYPE_INVALID)) {
         dbus_message_unref(msg);
         dbus_message_unref(reply);
         dbus_connection_unref(conn);
-        die("Cannot get screenshot path");
+        fprintf(stderr, "KDE DBus error: %s\n", err.message);
+        die("Cannot get screenshot path from KDE");
     }
     
     // Use sendfile for efficient copying
@@ -374,7 +446,6 @@ void screenshot_wayland(const char *filename) {
     fstat(src_fd, &st);
     
     #ifdef __linux__
-    #include <sys/sendfile.h>
     sendfile(dst_fd, src_fd, NULL, st.st_size);
     #else
     char buffer[65536];
@@ -414,7 +485,5 @@ int main(int argc, char *argv[]) {
     } else {
         screenshot_x11(filename);
     }
-    
-    printf("%s\n", filename);  // Output filename for scripts
     return 0;
 }
