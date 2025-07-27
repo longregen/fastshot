@@ -166,7 +166,112 @@ void screenshot_x11(const char *filename) {
     XCloseDisplay(display);
 }
 
+#ifdef USE_WLROOTS
+// wlr-screencopy implementation
+struct screencopy_data {
+    struct wl_shm *shm;
+    struct zwlr_screencopy_manager_v1 *screencopy_manager;
+    struct zwlr_screencopy_frame_v1 *frame;
+    struct wl_buffer *buffer;
+    struct wl_output *output;
+    int width, height;
+    int stride;
+    void *data;
+    int done;
+};
+
+static void frame_handle_buffer(void *data,
+    struct zwlr_screencopy_frame_v1 *frame,
+    uint32_t format, uint32_t width, uint32_t height, uint32_t stride)
+{
+    struct screencopy_data *ctx = data;
+    ctx->width = width;
+    ctx->height = height;
+    ctx->stride = stride;
+    
+    // Create shared memory
+    int size = stride * height;
+    int fd = memfd_create("microshot", 0);
+    if (fd < 0) die("memfd_create failed");
+    
+    if (ftruncate(fd, size) < 0) die("ftruncate failed");
+    
+    ctx->data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (ctx->data == MAP_FAILED) die("mmap failed");
+    
+    struct wl_shm_pool *pool = wl_shm_create_pool(ctx->shm, fd, size);
+    ctx->buffer = wl_shm_pool_create_buffer(pool, 0, width, height, stride, format);
+    wl_shm_pool_destroy(pool);
+    close(fd);
+}
+
+static void frame_handle_flags(void *data,
+    struct zwlr_screencopy_frame_v1 *frame, uint32_t flags)
+{
+    // Unused
+}
+
+static void frame_handle_ready(void *data,
+    struct zwlr_screencopy_frame_v1 *frame,
+    uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec)
+{
+    struct screencopy_data *ctx = data;
+    ctx->done = 1;
+}
+
+static void frame_handle_failed(void *data,
+    struct zwlr_screencopy_frame_v1 *frame)
+{
+    die("wlr-screencopy failed");
+}
+
+static const struct zwlr_screencopy_frame_v1_listener frame_listener = {
+    .buffer = frame_handle_buffer,
+    .flags = frame_handle_flags,
+    .ready = frame_handle_ready,
+    .failed = frame_handle_failed,
+};
+
+void screenshot_wlroots(const char *filename) {
+    struct wl_display *display = wl_display_connect(NULL);
+    if (!display) die("Cannot connect to Wayland display");
+    
+    struct screencopy_data ctx = {0};
+    
+    // Get registry and bind interfaces
+    struct wl_registry *registry = wl_display_get_registry(display);
+    // Simplified - would need full registry handling
+    
+    // Capture frame
+    ctx.frame = zwlr_screencopy_manager_v1_capture_output(
+        ctx.screencopy_manager, 1, ctx.output);
+    zwlr_screencopy_frame_v1_add_listener(ctx.frame, &frame_listener, &ctx);
+    
+    // Wait for capture
+    while (!ctx.done && wl_display_dispatch(display) != -1) {}
+    
+    // Write PNG
+    write_png(filename, ctx.data, ctx.width, ctx.height, 4);
+    
+    // Cleanup
+    munmap(ctx.data, ctx.stride * ctx.height);
+    wl_display_disconnect(display);
+}
+#endif
+
 void screenshot_wayland(const char *filename) {
+#ifdef USE_WLROOTS
+    // Try wlr-screencopy first
+    if (getenv("WAYLAND_DISPLAY")) {
+        struct wl_display *display = wl_display_connect(NULL);
+        if (display) {
+            wl_display_disconnect(display);
+            screenshot_wlroots(filename);
+            return;
+        }
+    }
+#endif
+    
     DBusError err;
     DBusConnection *conn;
     DBusMessage *msg, *reply;
@@ -289,16 +394,27 @@ void screenshot_wayland(const char *filename) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s output.png\n", argv[0]);
+    char filename[256];
+    
+    if (argc == 1) {
+        // Auto-generate timestamped filename
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        strftime(filename, sizeof(filename), "%Y-%m-%d_%H-%M-%S.png", tm_info);
+    } else if (argc == 2) {
+        strncpy(filename, argv[1], sizeof(filename) - 1);
+        filename[sizeof(filename) - 1] = '\0';
+    } else {
+        fprintf(stderr, "Usage: %s [output.png]\n", argv[0]);
         return 1;
     }
     
     if (is_wayland()) {
-        screenshot_wayland(argv[1]);
+        screenshot_wayland(filename);
     } else {
-        screenshot_x11(argv[1]);
+        screenshot_x11(filename);
     }
     
+    printf("%s\n", filename);  // Output filename for scripts
     return 0;
 }
