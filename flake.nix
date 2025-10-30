@@ -2,8 +2,8 @@
   description = "Fastshot - Screenshot loop utility";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
+    nixpkgs.url = "git+ssh://gitea/mirrors/nixpkgs?shallow=1&ref=nixos-unstable";
+    flake-utils.url = "git+ssh://gitea/mirrors/flake-utils";
   };
 
   outputs =
@@ -37,6 +37,12 @@
                 };
               })
             ];
+          };
+        };
+
+        checks = {
+          vm-test = pkgs.callPackage ./vm-test.nix {
+            inherit (self.packages.${system}) fastshot fastshotWithDesktop;
           };
         };
       }

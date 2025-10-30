@@ -353,15 +353,17 @@ static void save_screenshot_async(const screenshot_t *shot, const char *filename
         fprintf(stderr, "Failed to allocate PNG write task\n");
         return;
     }
-    
-    // Copy image data
-    task->data = malloc(shot->size);
+
+    // Copy image data - use aligned allocation for AVX compatibility
+    // Align to 32 bytes for AVX2 instructions
+    size_t aligned_size = (shot->size + 31) & ~31;  // Round up to nearest 32-byte boundary
+    task->data = aligned_alloc(32, aligned_size);
     if (!task->data) {
         fprintf(stderr, "Failed to allocate image buffer\n");
         free(task);
         return;
     }
-    
+
     memcpy(task->data, shot->data, shot->size);
     task->width = shot->width;
     task->height = shot->height;

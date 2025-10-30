@@ -22,7 +22,7 @@ pkgs.stdenv.mkDerivation {
     if enableValgrind then
       "-O0 -g3 -ggdb -fno-omit-frame-pointer -Wall -Wextra -Wuninitialized -Wmaybe-uninitialized"
     else
-      "-O3 -march=haswell -mtune=haswell -pipe -fno-plt -fomit-frame-pointer -ftree-vectorize";
+      "-O3 -march=x86-64 -mtune=generic -pipe -fno-plt -fomit-frame-pointer";
 
   LDFLAGS =
     "-Wl,-O1 -Wl,--as-needed -lpthread"

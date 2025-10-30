@@ -66,9 +66,15 @@ in
         Restart = "on-failure";
         RestartSec = "5";
 
+        # Set environment variables to help KWin recognize the application
+        Environment = [
+          "GIO_LAUNCHED_DESKTOP_FILE=${pkgs.fastshotWithDesktop}/share/applications/fastshot.desktop"
+          "GIO_LAUNCHED_DESKTOP_FILE_PID=$$"
+        ];
+
         ExecStartPre = [
           "${pkgs.systemd}/bin/systemctl --user import-environment DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR"
-          "${pkgs.coreutils}/bin/sleep 10" # TODO: instead of 10 seconds, can we test that the dbus session is ready or something?
+          "${pkgs.bash}/bin/bash -c 'for i in {1..20}; do ${pkgs.dbus}/bin/dbus-send --session --print-reply --dest=org.kde.KWin /Screenshot org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null && break || sleep 1; done'"
         ];
 
         # Run in the same slice as KDE to inherit permissions
