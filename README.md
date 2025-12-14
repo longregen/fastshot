@@ -1,141 +1,123 @@
-# FastShot
+# fastshot
 
-Quick PNG CLI screenshot utility for Plasma 6 with SIMD optimizations and secure KWin DBus integration.
+A screenshot utility for KDE Plasma 6 on Wayland. Captures screenshots via KWin's D-Bus interface and saves them as PNG files.
 
 ## Features
 
-- Fast screenshot capture using KWin's ScreenShot2 DBus interface
-- SIMD-optimized (AVX2) BGRA to RGBA conversion
-- Low-latency PNG encoding with minimal compression
-- Wayland-native (no X11 dependencies)
-- Secure desktop file integration with immutable permissions
+- Single-shot mode: take one screenshot and exit
+- Loop mode: continuous screenshots at configurable intervals
+- Image comparison: skips saving duplicate/similar screenshots using SIMD-optimized comparison
+- Async PNG writing: screenshots are saved in background threads to avoid blocking capture
 
-## Installation
+## Requirements
 
-### With Flakes (Recommended)
+- KDE Plasma 6 with KWin Wayland compositor
+- systemd (for D-Bus session bus access)
+- libpng
 
-#### As a NixOS Module
+## Usage
 
-Add to your `configuration.nix`:
+### Single shot
+
+```
+fastshot [output.png]
+```
+
+Takes a screenshot of the active screen and saves it. If no filename is provided, uses timestamp format `YYYY.MM.DD-HH.MM.SS.png`.
+
+### Loop mode
+
+```
+fastshot --loop [options]
+```
+
+Runs continuously, taking screenshots at regular intervals. Only saves when the screen content has changed beyond the similarity threshold.
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--loop` | Enable continuous screenshot mode | - |
+| `-d, --directory DIR` | Output directory | `~/desktop-record` |
+| `-i, --interval SECS` | Seconds between captures | 45 |
+| `-t, --threshold FLOAT` | Similarity threshold (0-1). Only saves if similarity is below this value | 0.99 |
+| `-v, --verbose` | Enable verbose logging | off |
+| `-h, --help` | Show help | - |
+
+**Example:**
+
+```
+fastshot --loop --directory ~/screenshots --interval 10 --threshold 0.95
+```
+
+This captures every 10 seconds and saves only when the screen differs by more than 5% from the last saved image.
+
+## NixOS Module
+
+A NixOS module is provided for running fastshot as a user service.
+
+### Configuration
 
 ```nix
 {
-  inputs.fastshot.url = "github:yourusername/fastshot";  # Update with your repo
+  imports = [ ./path/to/fastshot/module.nix ];
 
-  outputs = { self, nixpkgs, fastshot }: {
-    nixosConfigurations.yourhostname = nixpkgs.lib.nixosSystem {
-      modules = [
-        fastshot.nixosModules.default
-        {
-          services.fastshot.enable = true;
-        }
-      ];
-    };
+  services.fastshot = {
+    enable = true;
+    user = "alice";            # required: user to run the service for
+    directory = "screenshots";  # relative to $HOME
+    interval = 30;
+    threshold = 0.99;
+    verbose = false;
   };
 }
 ```
 
-#### As a Package
+The service runs as a systemd user unit, starting after `graphical-session.target`. The `user` option restricts the service to only run for the specified user.
 
-```bash
-# Try it without installing
-nix run github:yourusername/fastshot
+## Building
 
-# Install to your profile
-nix profile install github:yourusername/fastshot
+### With Nix
 
-# Or add to home-manager
-home.packages = [ inputs.fastshot.packages.${system}.default ];
 ```
-
-### Without Flakes
-
-Add to your `configuration.nix`:
-
-```nix
-{
-  imports = [ /path/to/fastshot/configuration.nix ];
-}
-```
-
-Or use the package directly:
-
-```nix
-{
-  environment.systemPackages = [
-    (pkgs.callPackage /path/to/fastshot/default.nix {})
-  ];
-}
-```
-
-## Usage
-
-```bash
-# Screenshot to timestamped file (YYYY.MM.DD-HH.MM.SS.png)
-fastshot
-
-# Screenshot to specific file
-fastshot myscreen.png
-
-# Screenshot to specific path
-fastshot ~/Pictures/screenshot.png
-```
-
-## Security
-
-FastShot uses KWin's restricted DBus interface `org.kde.KWin.ScreenShot2`. Access to this interface is controlled by:
-
-1. **Desktop file permissions**: The `.desktop` file with `X-KDE-DBUS-Restricted-Interfaces` must be immutable
-2. **Nix store immutability**: Desktop file is stored in `/nix/store/` (read-only)
-3. **System profile linking**: Only root (via `nixos-rebuild`) can modify the installation
-
-This prevents unauthorized applications from gaining screenshot permissions by modifying the desktop file.
-
-## Development
-
-```bash
-# Enter development shell
-nix develop
-
-# Build the package
 nix build
-
-# Run tests
-nix flake check
-
-# Run VM test manually
-nix-build test.nix
 ```
 
-## Testing
+Or enter a development shell:
 
-See [README-testing.md](./README-testing.md) for details on the NixOS VM test suite that validates:
-- Desktop file installation
-- Permission security (immutability)
-- DBus restriction configuration
-- User write protection
+```
+nix develop
+```
 
-## Architecture
+### Manual
 
-- **Language**: C with AVX2 intrinsics
-- **Dependencies**: systemd (sd-bus), libpng
-- **Build system**: Nix
-- **Target**: Linux with KDE Plasma 6 + Wayland
+```
+cd src
+gcc -O3 -mavx2 fastshot.c image-compare.c \
+  $(pkg-config --cflags --libs libsystemd libpng) \
+  -o fastshot
+```
 
-## Performance
+Requires: gcc, pkg-config, libsystemd-dev, libpng-dev
 
-- SIMD-optimized color conversion (BGRA→RGBA)
-- Fast PNG compression (level 1, no filtering)
-- Direct memory-mapped buffer handling
-- Zero-copy where possible
+## How it works
+
+1. Connects to the session D-Bus
+2. Calls `org.kde.KWin.ScreenShot2.CaptureActiveScreen` to capture the screen
+3. Reads BGRA pixel data from the returned pipe
+4. In loop mode, compares against the last saved screenshot using MSE-based similarity
+5. Converts BGRA to RGBA and writes PNG (async in loop mode)
+
+The image comparison uses AVX2 SIMD instructions when available for fast pixel differencing.
+
+## Files
+
+- `src/fastshot.c` - main program
+- `src/image-compare.c` - SIMD-optimized image comparison
+- `module.nix` - NixOS service module
+- `default.nix` - Nix package definition
+- `tests/vm.nix` - NixOS VM integration test
 
 ## License
 
 MIT
-
-## Contributing
-
-Contributions welcome! Please ensure:
-1. Code passes the VM test (`nix flake check`)
-2. Security properties are maintained (desktop file immutability)
-3. Performance optimizations don't break correctness

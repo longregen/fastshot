@@ -1,26 +1,7 @@
 { pkgs ? import <nixpkgs> {} }:
 
 let
-  fastshot = pkgs.callPackage ./default.nix {};
-
-  # Valgrind suppressions for known issues in dependencies
-  suppressions = pkgs.writeText "fastshot.supp" ''
-    # libsystemd internal allocations
-    {
-       systemd_internal
-       Memcheck:Leak
-       ...
-       obj:*/libsystemd.so*
-    }
-
-    # D-Bus internal allocations
-    {
-       dbus_internal
-       Memcheck:Leak
-       ...
-       obj:*/libdbus-1.so*
-    }
-  '';
+  fastshot = pkgs.callPackage ../default.nix {};
 
   # Minimal D-Bus session configuration
   dbusConfig = pkgs.writeText "session.conf" ''
@@ -75,7 +56,6 @@ let
         --track-origins=yes \
         --verbose \
         --error-exitcode=1 \
-        --suppressions=${suppressions} \
         ${fastshot}/bin/fastshot test-screenshot.png 2>&1 | tee valgrind.log
 
       VALGRIND_EXIT=$?
@@ -83,14 +63,14 @@ let
       # Check if screenshot was created
       if [ -f test-screenshot.png ]; then
         echo ""
-        echo "✓ Screenshot created successfully"
+        echo "Screenshot created successfully"
         ls -lh test-screenshot.png
 
         # Verify PNG file is valid
         if ${pkgs.file}/bin/file test-screenshot.png | grep -q PNG; then
-          echo "✓ Valid PNG file"
+          echo "Valid PNG file"
         else
-          echo "✗ Invalid PNG file"
+          echo "Invalid PNG file"
           kill $MOCK_PID 2>/dev/null || true
           exit 1
         fi
@@ -100,7 +80,7 @@ let
           ${pkgs.imagemagick}/bin/identify test-screenshot.png
         fi
       else
-        echo "✗ Screenshot file was not created"
+        echo "Screenshot file was not created"
         kill $MOCK_PID 2>/dev/null || true
         exit 1
       fi
@@ -113,14 +93,14 @@ let
       if [ $VALGRIND_EXIT -eq 0 ]; then
         echo ""
         echo "=== Valgrind Test PASSED ==="
-        echo "✓ No memory leaks detected"
-        echo "✓ No invalid memory access"
-        echo "✓ All memory properly freed"
+        echo "No memory leaks detected"
+        echo "No invalid memory access"
+        echo "All memory properly freed"
         exit 0
       else
         echo ""
         echo "=== Valgrind Test FAILED ==="
-        echo "✗ Memory errors detected (see log above)"
+        echo "Memory errors detected (see log above)"
         exit 1
       fi
     '
